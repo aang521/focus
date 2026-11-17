@@ -470,6 +470,29 @@ create_process_with_single_output_pipe :: (process: *Process, args: .. string, w
 
 }
 
+build_ignore_sigpipe :: () {
+    signal(SIGPIPE, SIG_IGN);
+}
+
+write_to_process_stdin :: (process: *Process, data: [] u8) -> success: bool {
+    handle := process.input.handle;
+    if handle < 0
+        return false;
+
+    remaining := data;
+    while remaining.count > 0 {
+        written := write(handle, remaining.data, cast(u64) remaining.count);
+        if written < 0 {
+            if System.get_error_value() == EINTR
+                continue;
+            return false;
+        }
+        remaining.data  += written;
+        remaining.count -= written;
+    }
+    return true;
+}
+
 #scope_file
 
 #import "Basic";

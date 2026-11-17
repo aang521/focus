@@ -144,3 +144,39 @@ issue_read :: (pipe: *Process.Pipe) -> bool {
 
     return true;
 }
+
+build_ignore_sigpipe :: () {
+}
+
+kernel32 :: #library,system "kernel32";
+CancelIoEx :: (hFile: HANDLE, lpOverlapped: *OVERLAPPED) -> BOOL #foreign kernel32;
+
+write_to_process_stdin :: (process: *Process, data: [] u8) -> success: bool {
+    handle := process.input.handle;
+    if !handle || handle == INVALID_HANDLE_VALUE
+        return false;
+
+    overlapped: OVERLAPPED;
+    overlapped.hEvent = CreateEventW(null, 1, 0, null);
+    if !overlapped.hEvent
+        return false;
+    defer CloseHandle(overlapped.hEvent);
+
+    written: u32;
+    ok := WriteFile(handle, data.data, cast(u32) data.count, *written, *overlapped);
+    if !ok {
+        if GetLastError() != ERROR_IO_PENDING
+            return false;
+
+        transferred: s32;
+        if WaitForSingleObject(overlapped.hEvent, 200) != WAIT_OBJECT_0 {
+            CancelIoEx(handle, *overlapped);
+            GetOverlappedResult(handle, *overlapped, *transferred, 1);
+            return false;
+        }
+        if !GetOverlappedResult(handle, *overlapped, *transferred, 0)
+            return false;
+        written = cast(u32) transferred;
+    }
+    return written == cast(u32) data.count;
+}

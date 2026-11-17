@@ -41,6 +41,7 @@ init_build_system :: () {
 
     commands_refresh_after_config_change();
 
+    build_ignore_sigpipe();
     init(*build_mutex);
 
     thread_group = Thread_Group.{};  // in case we need to reinitialise it later
@@ -249,6 +250,7 @@ build_system_update :: () {
         }
 
         running_command = "";
+        build_pending_input.count = 0;
     }
 }
 
@@ -401,6 +403,124 @@ build_panel_width:  float = 0.5;
 build_panel_height: float = 0.5;
 build_panel_height_anim: Tween_Animation(float);
 
+
+build_stdin_is_open := false;
+build_pending_input: [..] u8;
+
+build_accepts_input :: () -> bool {
+    lock(*build_mutex);
+    defer unlock(*build_mutex);
+    return build_stdin_is_open;
+}
+
+build_input_handle_event :: (event: Input.Event) -> handled: bool {
+    if build_buffer_id < 0 || !build_accepts_input()
+        return false;
+
+    if event.type == {
+        case .TEXT_INPUT;
+            if key_sequence_input_in_progress()
+                return false;
+            if event.utf32 < 32 || event.utf32 == 127
+                return false;
+            utf8_char := convert_utf32_to_utf8(event.utf32);
+            build_input_feed(to_string(utf8_char.bytes.data, utf8_char.count));
+            return true;
+
+        case .KEYBOARD;
+            if !event.key_pressed
+                return false;
+
+            action := map_event_to_action(event, Action_Editors);
+            if action == {
+                case .break_line;
+                    build_input_feed("\n");
+                    return true;
+                case .delete_left_char;
+                    build_input_delete_last_char();
+                    return true;
+                case .paste;
+                    text := os_clipboard_get_text();
+                    defer free(text);
+                    clean := copy_temporary_string(text);
+                    clean_bytes := to_bytes(clean);
+                    remove_crlf_in_place(*clean_bytes);
+                    build_input_feed(cast(string) clean_bytes);
+                    return true;
+            }
+    }
+
+    return false;
+}
+
+build_input_feed :: (s: string) {
+    run_start := 0;
+    for 0..s.count {
+        if it < s.count && s[it] != #char "\n"
+            continue;
+
+        if it > run_start {
+            run := slice(s, run_start, it - run_start);
+            for byte : cast([] u8) run
+                array_add(*build_pending_input, byte);
+            print_to_output_panel_from_main_thread(run);
+        }
+        if it < s.count
+            build_input_submit_line();
+        run_start = it + 1;
+    }
+}
+
+build_input_submit_line :: () {
+    line := tprint("%\n", to_string(build_pending_input.data, build_pending_input.count));
+    build_pending_input.count = 0;
+    print_to_output_panel_from_main_thread("\n");
+
+    lock(*build_mutex);
+    success := build_stdin_is_open && write_to_process_stdin(*running_process, to_bytes(line));
+    unlock(*build_mutex);
+
+    if !success
+        add_user_warning("Couldn't send input to [%]: its stdin is closed", build_get_running_command_name(), dismiss_in_seconds = 3, tag = .build);
+}
+
+build_input_delete_last_char :: () {
+    if build_pending_input.count == 0
+        return;
+
+    start := build_pending_input.count - 1;
+    while start > 0 && (build_pending_input[start] & 0xC0) == 0x80
+        start -= 1;
+    num_bytes := build_pending_input.count - start;
+
+    editor, buffer := get_build_editor_and_buffer();
+
+    if buffer.bytes.count < num_bytes {
+        build_pending_input.count = 0;
+        return;
+    }
+    buffer_end_start := buffer.bytes.count - num_bytes;
+    if to_string(buffer.bytes.data + buffer_end_start, num_bytes) != to_string(build_pending_input.data + start, num_bytes) {
+        build_pending_input.count = 0;  // the output has moved on, forget about what we echoed
+        return;
+    }
+
+    push_allocator(focus_allocator);
+    lock(*buffer.content_lock);
+    resize(*buffer.tokens, buffer.bytes.count);
+    delete_range_raw(buffer, cast(s32) buffer_end_start, cast(s32) buffer.bytes.count);
+    delete_range(*buffer.tokens, cast(s32) buffer_end_start, cast(s32) num_bytes);
+    unlock(*buffer.content_lock);
+    if editor.line_wrap == .on
+        rescan_for_wrapped_lines(editor, buffer);
+
+    cursor := leave_only_original_cursor(editor);
+    cursor.pos = xx buffer.bytes.count;
+    cursor.sel = cursor.pos;
+    editor.scroll_to_cursor = .yes;
+
+    build_pending_input.count = start;
+}
 
 #scope_file
 
@@ -898,8 +1018,14 @@ run_command_while_monitoring_output :: (args: .. string, working_directory := ""
         launched := create_process_with_single_output_pipe(process, .. args, working_directory, arg_quoting = arg_quoting);
         if !launched return .{type = .FAILED_TO_LAUNCH};
     }
+
+    lock(*build_mutex);
+    build_stdin_is_open = true;
+    unlock(*build_mutex);
+
     defer {
         lock(*build_mutex);
+        build_stdin_is_open = false;
         deinit(process);
         unlock(*build_mutex);
     }

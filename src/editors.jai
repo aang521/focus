@@ -4,6 +4,9 @@
 editors_handle_event :: (event: Input.Event) -> handled: bool {
     mods := event.modifier_flags;
 
+    if active_global_widget == .build_panel && build_input_handle_event(event)
+        return true;
+
     if event.type == {
         case .KEYBOARD;
             if event.key_pressed {
