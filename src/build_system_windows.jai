@@ -145,9 +145,6 @@ issue_read :: (pipe: *Process.Pipe) -> bool {
     return true;
 }
 
-build_ignore_sigpipe :: () {
-}
-
 kernel32 :: #library,system "kernel32";
 CancelIoEx :: (hFile: HANDLE, lpOverlapped: *OVERLAPPED) -> BOOL #foreign kernel32;
 

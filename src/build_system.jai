@@ -41,7 +41,6 @@ init_build_system :: () {
 
     commands_refresh_after_config_change();
 
-    build_ignore_sigpipe();
     init(*build_mutex);
 
     thread_group = Thread_Group.{};  // in case we need to reinitialise it later

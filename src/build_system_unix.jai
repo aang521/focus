@@ -470,10 +470,6 @@ create_process_with_single_output_pipe :: (process: *Process, args: .. string, w
 
 }
 
-build_ignore_sigpipe :: () {
-    signal(SIGPIPE, SIG_IGN);
-}
-
 write_to_process_stdin :: (process: *Process, data: [] u8) -> success: bool {
     handle := process.input.handle;
     if handle < 0
